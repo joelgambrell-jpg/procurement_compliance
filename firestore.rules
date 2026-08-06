@@ -1,0 +1,24 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() { return request.auth != null; }
+    function projectMember(projectId) {
+      return signedIn() && exists(/databases/$(database)/documents/projects/$(projectId)/members/$(request.auth.uid));
+    }
+    function projectAdmin(projectId) {
+      return projectMember(projectId) && get(/databases/$(database)/documents/projects/$(projectId)/members/$(request.auth.uid)).data.role in ['admin','engineer'];
+    }
+    match /projects/{projectId} {
+      allow read: if projectMember(projectId);
+      allow create: if signedIn();
+      allow update, delete: if projectAdmin(projectId);
+      match /members/{uid} { allow read: if projectMember(projectId); allow write: if projectAdmin(projectId); }
+      match /documents/{documentId} { allow read: if projectMember(projectId); allow create, update, delete: if projectAdmin(projectId); }
+      match /pages/{pageId} { allow read: if projectMember(projectId); allow write: if false; }
+      match /requirements/{requirementId} { allow read: if projectMember(projectId); allow create, update, delete: if projectAdmin(projectId); }
+      match /partChecks/{checkId} { allow read, create: if projectMember(projectId); allow update, delete: if projectAdmin(projectId); }
+      match /audit/{auditId} { allow read: if projectAdmin(projectId); allow create: if projectMember(projectId); allow update, delete: if false; }
+      match /supplierSearches/{searchId} { allow read, create: if projectMember(projectId); allow update, delete: if false; }
+    }
+  }
+}
