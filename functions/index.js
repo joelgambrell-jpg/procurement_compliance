@@ -31,8 +31,6 @@ function sectionClue(text = '') {
   return 'Section not automatically identified';
 }
 
-// NON-AI document processing. Digital PDF text extraction only.
-// Scanned/image-only pages are flagged OCR_REQUIRED and are never sent to an AI service.
 exports.processProjectPdf = onObjectFinalized({ region: 'us-central1', timeoutSeconds: 540, memory: '2GiB' }, async event => {
   const object = event.data;
   const parsed = assertProjectPath(object.name);
@@ -63,8 +61,8 @@ exports.processProjectPdf = onObjectFinalized({ region: 'us-central1', timeoutSe
   }
 });
 
-const ALLOWED_KEYS = new Set(['partCategory','application','environment','approvedManufacturers','technicalCriteria']);
-const BLOCKED_PATTERNS = [/customer/i,/client/i,/project\s*(name|id)/i,/document/i,/specification\s*(section|number)/i,/drawing/i,/page\s*\d+/i,/excerpt/i,/address/i,/site\s*name/i,/quantity/i];
+const ALLOWED_KEYS = new Set(['partCategory','application','environment','approvedManufacturers','preferredSuppliers','sourcingRegion','technicalCriteria']);
+const BLOCKED_PATTERNS = [/customer/i,/client/i,/project\s*(name|id)/i,/document/i,/specification\s*(section|number)/i,/drawing/i,/page\s*\d+/i,/excerpt/i,/project\s*site/i,/site\s*name/i,/bid\s*quantity/i,/pricing\s*strategy/i];
 
 function sanitizeSupplierPayload(input) {
   const clean = {};
@@ -76,22 +74,77 @@ function sanitizeSupplierPayload(input) {
   return clean;
 }
 
+function validHttpUrl(value) {
+  try { const u = new URL(value); return u.protocol === 'https:' || u.protocol === 'http:'; } catch { return false; }
+}
+
+function normalizeCandidate(candidate) {
+  const technicalEvidence = candidate?.technicalEvidence || {};
+  const suppliers = Array.isArray(candidate?.suppliers) ? candidate.suppliers.filter(s => s && validHttpUrl(s.purchaseUrl)) : [];
+  if (!candidate?.manufacturer || !candidate?.partNumber) return null;
+  if (!validHttpUrl(technicalEvidence.sourceUrl)) return null;
+  if (!suppliers.length) return null;
+  return {
+    manufacturer: String(candidate.manufacturer),
+    partNumber: String(candidate.partNumber),
+    description: String(candidate.description || ''),
+    candidateStatus: 'CANDIDATE_VERIFY',
+    technicalEvidence: {
+      sourceTitle: String(technicalEvidence.sourceTitle || 'Official product documentation'),
+      sourceType: String(technicalEvidence.sourceType || 'manufacturer'),
+      sourceUrl: technicalEvidence.sourceUrl,
+      retrievedAt: String(technicalEvidence.retrievedAt || new Date().toISOString()),
+      facts: Array.isArray(technicalEvidence.facts) ? technicalEvidence.facts.map(String).slice(0, 30) : []
+    },
+    suppliers: suppliers.slice(0, 12).map(s => ({
+      supplierName: String(s.supplierName || 'Supplier'),
+      branchName: String(s.branchName || ''),
+      cityState: String(s.cityState || ''),
+      phone: String(s.phone || ''),
+      price: String(s.price || ''),
+      stockStatus: String(s.stockStatus || 'Availability not verified'),
+      purchaseUrl: s.purchaseUrl,
+      checkedAt: String(s.checkedAt || new Date().toISOString())
+    }))
+  };
+}
+
 exports.searchPublicSuppliers = onCall({ region: 'us-central1', secrets: [SUPPLIER_AI_ENDPOINT, SUPPLIER_AI_KEY], timeoutSeconds: 120 }, async request => {
   const { projectId, criteria } = request.data || {};
   await assertMember(request.auth?.uid, projectId);
   const project = await db.doc(`projects/${projectId}`).get();
   if (!project.exists || project.data().supplierAiPolicy !== 'public_only') throw new HttpsError('failed-precondition', 'Public supplier AI is disabled for this project.');
   const sanitized = sanitizeSupplierPayload(criteria);
-
-  // This function has no code path or IAM requirement to read project documents/pages.
-  // Configure an approved public-web research provider through Secret Manager.
   const endpoint = SUPPLIER_AI_ENDPOINT.value();
   const apiKey = SUPPLIER_AI_KEY.value();
   if (!endpoint || !apiKey) throw new HttpsError('failed-precondition', 'Supplier search provider is not configured.');
 
-  const response = await fetch(endpoint, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${apiKey}` }, body: JSON.stringify({ criteria: sanitized, sources: ['manufacturer','approved_distributor','public_catalog'], requireEvidence: true }) });
+  const response = await fetch(endpoint, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${apiKey}` },
+    body: JSON.stringify({
+      criteria: sanitized,
+      sources: ['official_manufacturer_product_page','official_manufacturer_datasheet','approved_distributor','public_catalog'],
+      requireEvidence: true,
+      requireOfficialTechnicalSource: true,
+      requirePurchaseSource: true,
+      requiredCandidateShape: {
+        manufacturer: 'string', partNumber: 'string', description: 'string',
+        technicalEvidence: { sourceTitle: 'string', sourceType: 'string', sourceUrl: 'https URL', retrievedAt: 'ISO date', facts: ['string'] },
+        suppliers: [{ supplierName: 'string', branchName: 'string', cityState: 'string', phone: 'string', price: 'string', stockStatus: 'string', purchaseUrl: 'https URL', checkedAt: 'ISO date' }]
+      }
+    })
+  });
   if (!response.ok) throw new HttpsError('internal', `Supplier provider returned ${response.status}.`);
   const result = await response.json();
-  await db.collection(`projects/${projectId}/supplierSearches`).add({ requestedBy: request.auth.uid, sanitizedCriteria: sanitized, result, customerDocumentsSent: false, createdAt: admin.firestore.FieldValue.serverTimestamp() });
-  return { sanitizedCriteria: sanitized, candidates: result.candidates || [], customerDocumentsSent: false };
+  const candidates = (Array.isArray(result.candidates) ? result.candidates : []).map(normalizeCandidate).filter(Boolean);
+  await db.collection(`projects/${projectId}/supplierSearches`).add({
+    requestedBy: request.auth.uid,
+    sanitizedCriteria: sanitized,
+    candidates,
+    rejectedCandidateCount: Math.max(0, (result.candidates || []).length - candidates.length),
+    customerDocumentsSent: false,
+    createdAt: admin.firestore.FieldValue.serverTimestamp()
+  });
+  return { sanitizedCriteria: sanitized, candidates, customerDocumentsSent: false, evidenceRequired: true, purchaseSourceRequired: true };
 });
