@@ -2,23 +2,59 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
     function signedIn() { return request.auth != null; }
-    function projectMember(projectId) {
-      return signedIn() && exists(/databases/$(database)/documents/projects/$(projectId)/members/$(request.auth.uid));
-    }
-    function projectAdmin(projectId) {
-      return projectMember(projectId) && get(/databases/$(database)/documents/projects/$(projectId)/members/$(request.auth.uid)).data.role in ['admin','engineer'];
-    }
+    function memberDoc(projectId) { return get(/databases/$(database)/documents/projects/$(projectId)/members/$(request.auth.uid)); }
+    function projectMember(projectId) { return signedIn() && exists(/databases/$(database)/documents/projects/$(projectId)/members/$(request.auth.uid)); }
+    function role(projectId) { return memberDoc(projectId).data.role; }
+    function roleIn(projectId, roles) { return projectMember(projectId) && role(projectId) in roles; }
+    function admin(projectId) { return roleIn(projectId, ['admin']); }
+    function engineer(projectId) { return roleIn(projectId, ['admin','engineer']); }
+    function reviewer(projectId) { return roleIn(projectId, ['admin','engineer','reviewer']); }
+
     match /projects/{projectId} {
       allow read: if projectMember(projectId);
       allow create: if signedIn();
-      allow update, delete: if projectAdmin(projectId);
-      match /members/{uid} { allow read: if projectMember(projectId); allow write: if projectAdmin(projectId); }
-      match /documents/{documentId} { allow read: if projectMember(projectId); allow create, update, delete: if projectAdmin(projectId); }
-      match /pages/{pageId} { allow read: if projectMember(projectId); allow write: if false; }
-      match /requirements/{requirementId} { allow read: if projectMember(projectId); allow create, update, delete: if projectAdmin(projectId); }
-      match /partChecks/{checkId} { allow read, create: if projectMember(projectId); allow update, delete: if projectAdmin(projectId); }
-      match /audit/{auditId} { allow read: if projectAdmin(projectId); allow create: if projectMember(projectId); allow update, delete: if false; }
-      match /supplierSearches/{searchId} { allow read, create: if projectMember(projectId); allow update, delete: if false; }
+      allow update, delete: if admin(projectId);
+
+      match /members/{uid} {
+        allow read: if projectMember(projectId);
+        allow write: if admin(projectId);
+      }
+      match /documents/{documentId} {
+        allow read: if projectMember(projectId);
+        allow create, update, delete: if engineer(projectId);
+      }
+      match /pages/{pageId} {
+        allow read: if projectMember(projectId);
+        allow write: if false;
+      }
+      match /requirements/{requirementId} {
+        allow read: if projectMember(projectId);
+        allow write: if false;
+      }
+      match /requirementVersions/{versionId} {
+        allow read: if reviewer(projectId);
+        allow write: if false;
+      }
+      match /partChecks/{checkId} {
+        allow read: if projectMember(projectId);
+        allow create, update, delete: if false;
+      }
+      match /evidencePackages/{evidenceId} {
+        allow read: if projectMember(projectId);
+        allow write: if false;
+      }
+      match /preferredVendors/{vendorId} {
+        allow read: if projectMember(projectId);
+        allow create, update, delete: if roleIn(projectId, ['admin','engineer','procurement']);
+      }
+      match /supplierSearches/{searchId} {
+        allow read: if projectMember(projectId);
+        allow write: if false;
+      }
+      match /audit/{auditId} {
+        allow read: if reviewer(projectId);
+        allow create, update, delete: if false;
+      }
     }
   }
 }
