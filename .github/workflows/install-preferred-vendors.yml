@@ -1,0 +1,39 @@
+name: Install Preferred Vendor Module
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - preferred-vendors.js
+      - .github/workflows/install-preferred-vendors.yml
+
+permissions:
+  contents: write
+
+jobs:
+  install:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Add module script to index
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('index.html')
+          text = path.read_text()
+          tag = '<script src="preferred-vendors.js"></script>'
+          if tag not in text:
+              text = text.replace('</body>', f'{tag}\n</body>')
+              path.write_text(text)
+          PY
+      - name: Commit installation
+        run: |
+          if git diff --quiet; then
+            echo "Preferred vendor module already installed."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add index.html
+          git commit -m "Load preferred vendor manager"
+          git push
