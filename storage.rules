@@ -1,0 +1,15 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    function signedIn() { return request.auth != null; }
+    function member(projectId) {
+      return signedIn() && firestore.exists(/databases/(default)/documents/projects/$(projectId)/members/$(request.auth.uid));
+    }
+    match /projects/{projectId}/documents/{fileName} {
+      allow read: if member(projectId);
+      allow write: if member(projectId)
+        && request.resource.size < 200 * 1024 * 1024
+        && request.resource.contentType == 'application/pdf';
+    }
+  }
+}
